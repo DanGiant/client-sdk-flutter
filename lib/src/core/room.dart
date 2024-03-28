@@ -93,6 +93,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   E2EEManager? _e2eeManager;
   bool get isRecording => _isRecording;
   bool _isRecording = false;
+  bool get isLocalRecording => _isLocalRecording;
+  bool _isLocalRecording = false;
   bool _audioEnabled = true;
 
   lk_models.Room? _roomInfo;
@@ -190,7 +192,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       if (_isRecording != event.response.room.activeRecording) {
         _isRecording = event.response.room.activeRecording;
         emitWhenConnected(
-            RoomRecordingStatusChanged(activeRecording: _isRecording));
+            RoomRecordingStatusChanged(activeRecording: _isRecording,
+                activeLocalRecording: _isLocalRecording));
       }
 
       logger.fine('[Engine] Received JoinResponse, '
@@ -340,7 +343,8 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       if (_isRecording != event.room.activeRecording) {
         _isRecording = event.room.activeRecording;
         emitWhenConnected(
-            RoomRecordingStatusChanged(activeRecording: _isRecording));
+            RoomRecordingStatusChanged(activeRecording: _isRecording,
+                activeLocalRecording: _isLocalRecording));
       }
     })
     ..on<SignalRemoteMuteTrackEvent>((event) async {
