@@ -237,6 +237,14 @@ class _ControlsWidgetState extends State<ControlsWidget> {
     }
   }
 
+  void _onTapLocalRecorder() async {
+    if (!widget.room.isLocalRecording) {
+      await widget.room.startLocalRecorder('~/Downloads');
+    } else {
+      await widget.room.stopLocalRecorder();
+    }
+  }
+
   void _onTapSimulateScenario() async {
     final result = await context.showSimulateScenarioDialog();
     if (result != null) {
@@ -481,6 +489,11 @@ class _ControlsWidgetState extends State<ControlsWidget> {
             onPressed: _onTapSimulateScenario,
             icon: const Icon(Icons.bug_report),
             tooltip: 'Simulate scenario',
+          ),
+          IconButton(
+            onPressed: _onTapLocalRecorder,
+            icon: const Icon(Icons.video_camera_back),
+            tooltip: 'Simulate recorder',
           ),
         ],
       ),

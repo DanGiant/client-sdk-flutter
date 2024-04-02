@@ -15,10 +15,12 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:date_format/date_format.dart' as time;
 
 import 'package:collection/collection.dart';
 import 'package:meta/meta.dart';
 
+import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import '../core/signal_client.dart';
 import '../e2ee/e2ee_manager.dart';
 import '../events.dart';
@@ -38,6 +40,7 @@ import '../support/disposable.dart';
 import '../support/platform.dart';
 import '../track/local/audio.dart';
 import '../track/local/video.dart';
+import '../track/local/local.dart';
 import '../track/track.dart';
 import '../types/other.dart';
 import '../utils.dart';
@@ -45,6 +48,16 @@ import 'engine.dart';
 
 import '../track/web/_audio_api.dart'
     if (dart.library.html) '../track/web/_audio_html.dart' as audio;
+
+class ParticipantTrackInfo {
+  ParticipantTrackInfo(
+      {required this.participant,
+        required this.videoTrack,
+        required this.isScreenShare});
+  VideoTrack? videoTrack;
+  Participant participant;
+  final bool isScreenShare;
+}
 
 /// Room is the primary construct for LiveKit conferences. It contains a
 /// group of [Participant]s, each publishing and subscribing to [Track]s.
@@ -93,11 +106,19 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
   E2EEManager? _e2eeManager;
   bool get isRecording => _isRecording;
   bool _isRecording = false;
-  bool get isLocalRecording => _isLocalRecording;
-  bool _isLocalRecording = false;
   bool _audioEnabled = true;
 
   lk_models.Room? _roomInfo;
+
+  /// Local recorder
+  rtc.LocalMediaRecorder? get localRecorder => _localRecorder;
+  rtc.LocalMediaRecorder? _localRecorder;
+
+  /// Local recorder running flag
+  bool get isLocalRecording => _isLocalRecording;
+  bool get _isLocalRecording => _localRecorder != null;
+
+  List<ParticipantTrackInfo> _participantTrackInfos = [];
 
   /// a list of participants that are actively speaking, including local participant.
   UnmodifiableListView<Participant> get activeSpeakers =>
@@ -483,6 +504,9 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
 
   /// Disconnects from the room, notifying server of disconnection.
   Future<void> disconnect() async {
+    if (_isLocalRecording) {
+      await stopLocalRecorder();
+    }
     if (engine.isClosed) {
       events.emit(RoomDisconnectedEvent(reason: DisconnectReason.unknown));
       return;
@@ -722,6 +746,148 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       ),
       publishTracks: localParticipant?.publishedTracksInfo(),
     );
+  }
+
+  Future<void> _sortParticipants() async {
+    List<ParticipantTrackInfo> userMediaTracks = [];
+    List<ParticipantTrackInfo> screenTracks = [];
+
+    for (var participant in remoteParticipants.values) {
+      for (var t in participant.videoTrackPublications) {
+        if (t.isScreenShare) {
+          screenTracks.add(ParticipantTrackInfo(
+            participant: participant,
+            videoTrack: t.track,
+            isScreenShare: true,
+          ));
+        } else {
+          userMediaTracks.add(ParticipantTrackInfo(
+            participant: participant,
+            videoTrack: t.track,
+            isScreenShare: false,
+          ));
+        }
+      }
+    }
+    // sort speakers for the grid
+    userMediaTracks.sort((a, b) {
+      // loudest speaker first
+      if (a.participant.isSpeaking && b.participant.isSpeaking) {
+        if (a.participant.audioLevel > b.participant.audioLevel) {
+          return -1;
+        } else {
+          return 1;
+        }
+      }
+
+      // last spoken at
+      final aSpokeAt = a.participant.lastSpokeAt?.millisecondsSinceEpoch ?? 0;
+      final bSpokeAt = b.participant.lastSpokeAt?.millisecondsSinceEpoch ?? 0;
+
+      if (aSpokeAt != bSpokeAt) {
+        return aSpokeAt > bSpokeAt ? -1 : 1;
+      }
+
+      // video on
+      if (a.participant.hasVideo != b.participant.hasVideo) {
+        return a.participant.hasVideo ? -1 : 1;
+      }
+
+      // joinedAt
+      return a.participant.joinedAt.millisecondsSinceEpoch -
+          b.participant.joinedAt.millisecondsSinceEpoch;
+    });
+
+    final localParticipantTracks = localParticipant?.videoTrackPublications;
+    if (localParticipantTracks != null) {
+      for (var t in localParticipantTracks) {
+        if (t.isScreenShare) {
+          screenTracks.add(ParticipantTrackInfo(
+            participant: localParticipant!,
+            videoTrack: t.track,
+            isScreenShare: true,
+          ));
+        } else {
+          userMediaTracks.add(ParticipantTrackInfo(
+            participant: localParticipant!,
+            videoTrack: t.track,
+            isScreenShare: false,
+          ));
+        }
+      }
+    }
+    _participantTrackInfos = [...screenTracks, ...userMediaTracks];
+  }
+
+  String _getCurrentTimeString() {
+    String timeString = time.formatDate(DateTime.now(),['yyyy', 'mm', 'dd', '-', 'HH', 'nn', 'ss']);
+    return timeString;
+  }
+
+  Future<bool> startLocalRecorder(String filePath) async {
+    if (lkPlatformIs(PlatformType.iOS) || lkPlatformIs(PlatformType.android)) {
+      logger.warning('startLocalRecorder is not implemented for mobile platform yet!');
+      return false;
+    }
+
+    if (_isLocalRecording) {
+      logger.warning('Room has already started local recorder.');
+      return true;
+    }
+
+    String fileName = '${name!}-${_getCurrentTimeString()}.mp4';
+    String fullPath = '$filePath/$fileName';
+
+    logger.fine('Start recording to file:$fullPath');
+
+    await _sortParticipants();
+
+    List<rtc.MediaStream> videoStreams = [];
+    for (var trackInfo in _participantTrackInfos) {
+      if (trackInfo.videoTrack != null && trackInfo.videoTrack?.mediaStream != null) {
+        videoStreams.add(trackInfo.videoTrack!.mediaStream);
+      }
+    }
+    /// Create local file to save tracks
+    _localRecorder = rtc.LocalMediaRecorder();
+    await _localRecorder?.start(fullPath, videoStreams);
+
+    // _isLocalRecording = true;
+    return true;
+  }
+
+  Future<void> updateLocalRecorder() async {
+    if (_isLocalRecording) {
+      await _sortParticipants();
+
+      List<rtc.MediaStream> videoStreams = [];
+      for (var trackInfo in _participantTrackInfos) {
+        if (trackInfo.videoTrack != null && trackInfo.videoTrack?.mediaStream != null) {
+          videoStreams.add(trackInfo.videoTrack!.mediaStream);
+        }
+      }
+      return _localRecorder?.updateMediaStreams(videoStreams);
+    }
+  }
+
+  Future<void> stopLocalRecorder() async {
+    if (lkPlatformIs(PlatformType.iOS) || lkPlatformIs(PlatformType.android)) {
+      logger.warning('stopLocalRecorder is not implemented for mobile platform yet!');
+      return;
+    }
+
+    logger.fine('stopLocalRecorder is called!');
+
+    if (_isLocalRecording) {
+      logger.fine('stopLocalRecorder is stopping local recorder...');
+      /// Stop media recording
+      await _localRecorder?.stop();
+
+      logger.fine('stopLocalRecorder has stopped local recorder.');
+
+      // _isLocalRecording = false;
+      _localRecorder = null;
+    }
   }
 }
 
