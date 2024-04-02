@@ -835,7 +835,7 @@ class Room extends DisposableChangeNotifier with EventsEmittable<RoomEvent> {
       return true;
     }
 
-    String fileName = '${name!}-${_getCurrentTimeString()}.mp4';
+    String fileName = '${name!}-${_getCurrentTimeString()}.yuv';
     String fullPath = '$filePath/$fileName';
 
     logger.fine('Start recording to file:$fullPath');
